@@ -1,0 +1,24 @@
+{
+    // Use IntelliSense to learn about possible attributes.
+    // Hover to view descriptions of existing attributes.
+    // For more information, visit: https://go.microsoft.com/fwlink/?linkid=830387
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "Python: gs.py",
+            "type": "python",
+            "request": "launch",
+            "program": "gs.py",
+            "console": "integratedTerminal",
+            "justMyCode": true
+        },
+        {
+            "name": "DAP: gs_server.py",
+            "type": "python",
+            "request": "launch",
+            "program": "gs_server.py",
+            "console": "integratedTerminal",
+            "justMyCode": true
+        }
+    ]
+}
