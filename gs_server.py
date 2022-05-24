@@ -1,9 +1,12 @@
+import code
+from decimal import Clamped
 import socket
 import json
 import re
 import threading
 import os
 import copy
+from gs_codeblock import CodeBlock
 
 import gs_interpreter
 import dap_events
@@ -20,10 +23,12 @@ class Server:
         self.message_queue = []
         self.command_queue = []
         self.quit = False
+        self.condition = threading.Condition()
 
 
     def send_msg(self, obj):
-        self.message_queue.append(obj)
+        #self.message_queue.append(obj)
+        self.send(obj)
 
     def get_command(self):
         if self.command_queue:
@@ -51,47 +56,57 @@ class Server:
             try:
                 data = self.conn.recv(1024)
                 if not data:
-                    return
+                    raise OSError
                 self.command_queue.append(self.process_message(data))
+                self.condition.acquire()
+                self.condition.notify_all()
+                self.condition.release()
+                
             except OSError:
-                self.quit = True
+                self.wait_for_client()
             except Exception as e:
                 print(e)
 
-    def send(self):
-        while not self.quit:
-            if self.message_queue:
-                try:
-                    obj = self.message_queue.pop(0)
-                    msg = json.dumps(obj)
-                    msg = "Content-Length: {}\r\n\r\n{}".format(len(msg), msg)
-                    self.conn.send(msg.encode('utf8'))
-                except Exception as e:
-                    print(e)
+    def send(self, obj):
+        if not self.conn:
+            return
+
+        try:
+            msg = json.dumps(obj)
+            msg = "Content-Length: {}\r\n\r\n{}".format(len(msg), msg)
+            self.conn.send(msg.encode('utf8'))
+        except Exception as e:
+            print(e)
         
         
     def start(self):
-        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as self.socket:
-            self.socket.bind((self.host,self.port))
-            self.socket.listen()
+        self.socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self.socket.settimeout(10.0)
+        self.socket.bind((self.host,self.port))
+        self.socket.listen()
+        self.wait_for_client()
+        self.receive_thread = threading.Thread(target=self.receive)
+        self.receive_thread.start()
 
+    def wait_for_client(self):
+
+        if self.quit:
+            return
+
+        try:
             self.conn,self.client_addr = self.socket.accept()
-
-                #self.receive()
-            self.receive_thread = threading.Thread(target=self.receive)
-            self.send_thread = threading.Thread(target=self.send)
-
-            self.receive_thread.start()
-            self.send_thread.start()
-
-
             print("Connected by {}".format(self.client_addr))
+        except socket.timeout:
+            self.quit = True
+            self.condition.acquire()
+            self.condition.notify_all()
+            self.condition.release()
+
 
     def stop(self):
         self.quit = True
         self.socket.close()
         self.receive_thread.join()
-        self.send_thread.join()
 
 
 
@@ -118,28 +133,206 @@ class Debugger:
             "disassemble": self.disassemble,
             "stepIn" : self.step_in,
             "stepOut" : self.step_out,
-            "next" : self.next
+            "next" : self.next,
+            "variables" : self.variables,
+            "setVariable" : self.set_variable
         }
 
-        self.variables = {
-
+        self.fetch_variables_map = {
+            "::built-ins" : self.fetch_built_ins,
+            "::stack" : self.fetch_stack,
+            "::loop_registers" : self.fetch_loop_registers,
+            "::variables" : self.fetch_variables
         }
+
+        self.set_variables_map = {
+            "::variables" : self.set_variables
+        }
+
+        #Use :: because : is a unsignable character
+        self.displayed_variables = ["undefined"]
+
+    def wait(self):
+        self.server.condition.acquire()
+        result = self.server.condition.wait(10) #wait 10 seconds in case we missing something?
+        #print("Notified {}".format(result))
 
     def run(self):
-        while not self.quit:
+        while not self.quit and not self.server.quit:
             command = self.server.get_command()
-            if command != None and command["command"] in self.command_map:
-                self.command_map[command["command"]](command)
+
+            while command != None:
+                if command["command"] in self.command_map:
+                    self.command_map[command["command"]](command)
+                    if self.quit:
+                        return
+
+                command = self.server.get_command()
 
             if self.interpreter:
                 if self.running:
                     self.interpreter.execute_instruction()
+                else:
+                    self.wait()
 
                 if self.interpreter.done():
-                    event = dap_events.Event("exited")
-                    event.set_body({"exitCode" : 0})
-                    self.server.send_msg(event.event())
-                    self.quit = True
+                    self.running = False
+                    self.finish()
+                    #self.quit = True
+
+            else:
+                self.wait()
+
+
+    def has_children(self, obj):
+        instance_map = {
+            list : True,
+            gs_interpreter.CodeBlock : False,
+        }
+
+        if type(obj) in instance_map:
+            return instance_map[type(obj)]
+
+        return False
+
+    def add_display_variable(self,name):
+        if name in self.displayed_variables:
+            return self.displayed_variables.index(name)
+
+        idx = len(self.displayed_variables)
+        self.displayed_variables.append(name)
+        return idx
+
+    def set_variable(self, command):
+        reference = command["arguments"]["variablesReference"]
+        value = "undefined"
+        if reference <= len(self.displayed_variables):
+            category_name = self.displayed_variables[reference]   
+            if category_name in self.set_variables_map:
+                value = self.set_variables_map[category_name](command)
+
+        if isinstance(value, str):
+            value = "'" + value + "'"
+
+        self.server.send_msg(command.response({
+            "value" : str(value)
+        }))
+
+    def set_variables(self, command):
+        name = command["arguments"]["name"]
+        value = command["arguments"]["value"]
+        old = "undefined"
+        try:
+            old = self.interpreter.symbols[name]
+            value = value.replace("\'","\"")
+            value = "{ \"result\" : " + value + "}"
+            value = json.loads(value)["result"]
+            self.interpreter.symbols[name] = value
+            return value
+        except Exception as e:
+            print(e)
+        
+        return old
+        
+
+    def fetch_variables(self):
+        variables = []
+        for name,value in sorted(self.interpreter.symbols.items()):
+
+            if name in self.interpreter.default_symbols and value == self.interpreter.default_symbols[name]:
+                continue 
+
+            if isinstance(value, str):
+                value = "'" + value + "'"
+
+            variables.append({
+                "name" : name,
+                "value" : str(value),
+                "variablesReference": 0
+            })
+
+        return variables
+        
+
+    def fetch_loop_registers(self):
+        variables = []
+
+        current_frame = self.interpreter.stack_frame()
+
+        for name,value in current_frame.get_registers():
+            variables.append({
+                "name" : name,
+                "value" : str(value),
+                "variablesReference" : 0
+            })
+        return variables
+
+    def fetch_stack(self):
+        variables = []
+
+        sp = max(0,self.interpreter.sp+1)
+
+        for i,item in enumerate(self.interpreter.stack[:sp]):
+            variables.append({
+                "name" : str(i),
+                "value" : str(item),
+                "variablesReference" : 0
+            })
+
+        return list(reversed(variables))
+    
+    def fetch_built_ins(self):
+        variables = [
+            {
+                "name" : "stack",
+                "value" : str(self.interpreter.stack[:self.interpreter.sp+1]),
+                "variablesReference" : self.add_display_variable("::stack")
+            },
+            {
+                "name" : "variables",
+                "value" : "<variable table>",
+                "variablesReference" : self.add_display_variable("::variables")
+            }
+        ]
+
+        current_frame = self.interpreter.stack_frame()
+
+        if type(current_frame) != gs_interpreter.CodeBlock:
+            variables.append({
+                "name" : "Loop Registers",
+                "value" : str(current_frame),
+                "variablesReference" : self.add_display_variable("::loop_registers")
+            })
+
+        return variables
+
+    def create_variables(self,reference):
+        if reference >= len(self.displayed_variables):
+            return []
+
+        name = self.displayed_variables[reference]
+
+        if name in self.fetch_variables_map:
+            return self.fetch_variables_map[name]()
+        elif name in self.interpreter.symbols:
+            variables = [{
+                "name" : name,
+                "value" : str(self.interpreter.symbols[name]),
+                "variablesReference" : 0
+            }]
+
+            return variables
+
+        return []
+
+    def variables(self, command):
+        reference = command["arguments"]["variablesReference"]
+
+        self.server.send_msg(command.response({
+            "variables" : self.create_variables(reference)
+        }))
+
+
 
     def step_in(self,command):
         self.server.send_msg(command.response())
@@ -172,9 +365,7 @@ class Debugger:
         address = int(address,16)
 
         frame,ip = self.from_address(address)
-        
-        
-
+    
         instructions = []
 
         if frame < len(self.interpreter.call_stack):
@@ -210,15 +401,15 @@ class Debugger:
         
 
     def scopes(self,command):
+
         body = {
             "scopes" : [{
                 "name" : "built-ins",
-                "variablesReference" : 0,
-                "indexedVariables" : 1,
+                "variablesReference" : self.add_display_variable("::built-ins"),
+                "indexedVariables" : 10,
                 "expensive" : False
             }]
         }
-
         self.server.send_msg(command.response(body))
 
 
@@ -277,10 +468,16 @@ class Debugger:
             "breakpoints" : breakpoints
         }))
 
+    def finish(self):
+        event = dap_events.Event("terminated")
+        self.server.send_msg(event.event())
 
     def disconnect(self,command):
         self.quit = True
         self.server.send_msg(command.response())
+        event = dap_events.Event("exited")
+        event.set_body({"exitCode" : 0})
+        self.server.send_msg(event.event())
 
     def launch(self,command):
         script = command["arguments"]["script"]
@@ -306,6 +503,8 @@ class Debugger:
                 #"reason" : "entry"
             #})
             #self.server.send_msg(event.event())
+
+            #
 
         except IOError:
             self.server.send_msg(command.response(None,'error: file not found'))          
@@ -371,12 +570,14 @@ class Debugger:
             frame = {
                 "id" : i+1,
                 "name" : str(block),
-                "source" : {
-                    "name" : self.filename,
-                    "path" : self.source
-                },
                 "instructionPointerReference" : "0x{:06x}".format(self.to_address(i,block.get_ip()))
             }
+
+            if type(block) == gs_interpreter.CodeBlock:
+                frame["source"] = {
+                        "name" : self.filename,
+                        "path" : self.source
+                }
 
             line,column = self.get_line_column2(block)
 
@@ -399,4 +600,5 @@ if __name__ == "__main__":
     server.start()
     debugger = Debugger(server)
     debugger.run()
+    print(debugger.interpreter.stack[:debugger.interpreter.sp+1])
     server.stop()

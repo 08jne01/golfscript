@@ -34,6 +34,12 @@ class CodeBlock:
 
         self.ip = 0
 
+    def __eq__(self, other):
+        if isinstance(other,CodeBlock):
+            return self.tokens == other.tokens
+        else:
+            return False
+
     def __add__(self, other):
         return CodeBlock((self.tokens + other.tokens, self.txt_index + other.txt_index))
 
@@ -84,7 +90,15 @@ class CodeBlock:
         return '{' + ''.join(self.tokens) + '}'
 
     def __repr__(self):
-        return str(self.tokens[self.ip:])
+        #return str(self.tokens[self.ip:])
+        return self.__str__()
+
+    def get_registers(self):
+        obj = [
+            ("code", self.__str__()),
+            ("instruction_pointer", self.ip)
+        ]
+        return obj
 
 class For(CodeBlock):
     def __init__(self, code : CodeBlock, number : int):
@@ -112,6 +126,13 @@ class For(CodeBlock):
 
     def get_current_instruction(self):
         return None
+
+    def get_registers(self):
+        obj = [
+            ("code", self.code),
+            ("count", self.number)
+        ]
+        return obj
 
 
 class ForEach(CodeBlock):
@@ -150,6 +171,15 @@ class ForEach(CodeBlock):
     def get_current_instruction(self):
         return None
 
+    def get_registers(self):
+        obj = [
+            ("code", self.code),
+            ("items", self.item),
+            ("pushing_code", self.push_code),
+            ("fold",self.fold)
+        ]
+        return obj
+
 class ForEachFold(ForEach):
     def get_next_item(self,top):
         if self.push_code:
@@ -170,6 +200,105 @@ class ForEachFold(ForEach):
     def get_current_instruction(self):
         return None
 
+class ComplexCodeBlock(CodeBlock):
+    def __init__(self, start : list, sequence : list, end : list):
+        self.ip = 0
+        self.start = start
+        self.sequence = sequence
+        self.sequence_done = self.sequence == None
+        self.end = end
+
+    def get_ip(self):
+        return 0
+
+    def set_ip(self,ip):
+        pass
+
+    def get_current_instruction(self):
+        return None
+
+    def get_next_item(self,top):
+        if self.start:
+            return self.start.pop(0)(top)
+        elif self.sequence and not self.sequence_done:
+            
+            sequence_result = self.sequence[self.ip](top)
+            self.sequence_done = sequence_result == None
+            self.ip = (self.ip + 1) % len(self.sequence)
+
+            if sequence_result != None:
+                return sequence_result
+            elif self.end:
+                return self.end.pop(0)(top)
+            else:
+                return None
+
+        elif self.end:
+            return self.end.pop(0)(top)
+        else:
+            return None
+
+    def get_registers(self):
+        obj = [
+            ("code", self.code),
+            ("items", self.item),
+            ("start_code", self.start),
+            ("sequence_code", self.sequence),
+            ("sequence_ptr",self.ip),
+            ("end_code", self.end),
+        ]
+        return obj
+
+    def __str__(self):
+        return "ComplexCodeBlock"
+
+#Map the code onto the list keeping the list
+class Map(ComplexCodeBlock):
+    def __init__(self, code : CodeBlock,item : list):
+        self.code = copy.deepcopy(code)
+        self.code.immediate = True
+        self.item = copy.deepcopy(item)
+
+        start = [lambda top : CodeBlock('[', True)]
+        sequence = [self.pop_list,self.map_code]
+        end = [lambda top : CodeBlock(']', True)]
+        super().__init__(start,sequence,end)
+
+    def pop_list(self,top):
+        if self.item:
+            return self.item.pop(0)
+        return None
+
+    def map_code(self,top):
+        return self.code
+
+    def __str__(self):
+        return "MapBlock"
+
+class MapCondition(Map):
+    def __init__(self, code : CodeBlock, item : list):
+        super().__init__(code, item)
+        self.original = copy.deepcopy(item)
+
+        self.end.append(self.examine_conditions)
+        self.end.append(self.swap)
+
+    def examine_conditions(self,top):
+        self.new_arr = []
+        for i,v in enumerate(top):
+            if v:
+                self.new_arr.append(self.original[i])
+
+        #Pop the old array
+        return CodeBlock(';', True)
+
+    def swap(self, top):
+        return self.new_arr
+
+    def __str__(self):
+        return "MapBlockConditional"
+
+
 
 class Do(CodeBlock):
     def __init__(self,code : CodeBlock):
@@ -188,6 +317,12 @@ class Do(CodeBlock):
 
     def set_ip(self,ip):
         pass
+
+    def get_registers(self):
+        obj = [
+            ("condition", self.code)
+        ]
+        return obj
 
     def __str__(self):
         return "Do"
@@ -230,6 +365,14 @@ class WhileBlock(CodeBlock):
 
     def get_current_instruction(self):
         return None
+
+    def get_registers(self):
+        obj = [
+            ("code", self.code),
+            ("condition", self.condition),
+            ("processing_condition", self.is_condition)
+        ]
+        return obj
 
 class UntilBlock(WhileBlock):
     def check_condition(self, top):

@@ -207,7 +207,7 @@ def op_mod(self):
         self.sp -= 1
         self.stack[self.sp] = result
     elif check_type(self, CodeBlock, list):
-        loop = ForEach(self.top(), self.stack[self.sp-1], 0)
+        loop = Map(self.top(), self.stack[self.sp-1])
         self.call(loop)
         self.sp -= 2
 
@@ -266,7 +266,8 @@ def op_asn(self):
         self.symbols[keyword] = self.top()
 
 def op_pop(self):
-    self.sp -= 1
+    if self.sp >= 0:
+        self.sp -= 1
 
 def op_lt(self):
 
@@ -320,7 +321,9 @@ def op_eq(self):
 
 def op_arr(self):
     if check_type(self,CodeBlock,list):
-        raise NotImplementedError
+        loop = MapCondition(self.top(), self.stack[self.sp-1])
+        self.call(loop)
+        self.sp -= 2
     elif isinstance(self.top(), list):
         self.stack[self.sp] = len(self.top())
     else:
@@ -342,10 +345,24 @@ def op_pow(self):
     raise TypeError
 
 def op_dec(self):
-    self.stack[self.sp] -= 1
+    
+    if isinstance(self.top(), list):
+        x = self.top()[0]
+        self.stack[self.sp] = self.top()[1:]
+        self.sp += 1
+        self.stack[self.sp] = x
+    else:
+        self.stack[self.sp] -= 1
+
 
 def op_inc(self):
-    self.stack[self.sp] += 1 
+    if isinstance(self.top(), list):
+        x = self.top()[-1]
+        self.stack[self.sp] = self.top()[:-1]
+        self.sp += 1
+        self.stack[self.sp] = x
+    else:
+        self.stack[self.sp] += 1 
 
 def op_print(self):
     print(str(self.stack[self.sp]), end='')

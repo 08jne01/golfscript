@@ -1,3 +1,4 @@
+import collections
 from gs_codeblock import *
 from gs_operator import *
 import copy
@@ -11,7 +12,7 @@ class Interpreter:
         self.sp = -1
         self.bracket_stack = []
 
-        self.symbols = self.symbols = {
+        self.symbols = {
             "~" : op_bit_not,
             "`" : op_str,
             "!" : op_not,
@@ -44,7 +45,7 @@ class Interpreter:
             "print" : op_print,
             "p" : CodeBlock("`puts"),
             "n" : "\n",
-            "puts" : "print n print",
+            "puts" : CodeBlock("print n print"),
             "rand" : op_rand,
             "do" : op_do,
             "while" : op_while,
@@ -54,6 +55,8 @@ class Interpreter:
             "zip"   : op_zip,
             "base"  : op_base, #partial
         }
+
+        self.default_symbols = copy.deepcopy(self.symbols)
 
     def stack_frame(self):
         return self.call_stack[-1]
@@ -101,7 +104,7 @@ class Interpreter:
                     self.call(item)
                 else:
                     self.push(item)
-            elif item in self.symbols:
+            elif isinstance(item, collections.Hashable) and item in self.symbols:
                 translation = self.symbols[item]
 
                 if callable(translation):

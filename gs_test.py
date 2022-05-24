@@ -132,7 +132,7 @@ class TestInterpreter(unittest.TestCase):
     def test_op_arr(self):
         self.check("10,", [0,1,2,3,4,5,6,7,8,9])
         self.check("10,,", 10)
-        #self.check("10,{3%},", [1,2,4,5,7,8])
+        self.check("10,{3%},", [1,2,4,5,7,8])
 
     def test_op_dup(self):
         self.check("1 2 3.", [1,2,3,3])
