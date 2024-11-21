@@ -1,4 +1,5 @@
 import collections
+import collections.abc
 from gs_codeblock import *
 from gs_operator import *
 import copy
