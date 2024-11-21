@@ -104,7 +104,7 @@ class Interpreter:
                     self.call(item)
                 else:
                     self.push(item)
-            elif isinstance(item, collections.Hashable) and item in self.symbols:
+            elif isinstance(item, collections.abc.Hashable) and item in self.symbols:
                 translation = self.symbols[item]
 
                 if callable(translation):
